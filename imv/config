@@ -1,0 +1,15 @@
+[options]
+# Gallery-only overlay: IDs are generated from review order and mapped in the
+# private queue state. Source images and their metadata are never edited.
+overlay = true
+overlay_font = Monospace:19
+overlay_text = $(agent-gallery label "$imv_current_file")  ·  image $imv_current_index
+overlay_text_color = fff2e8
+overlay_background_color = 181114
+overlay_background_alpha = dc
+overlay_position_bottom = true
+title_text = Agent Gallery — $(agent-gallery label "$imv_current_file")
+
+[binds]
+j = prev
+l = next

@@ -1,0 +1,272 @@
+#!/usr/bin/env bash
+# Shared, keyboard-first review queue for image sets produced by local agents.
+set -euo pipefail
+
+STATE_ROOT="${XDG_STATE_HOME:-$HOME/.local/state}/agent-gallery"
+QUEUE="$STATE_ROOT/queue"
+REVIEWED="$STATE_ROOT/reviewed"
+ACTIVE="$STATE_ROOT/active"
+QUEUE_LOCK="$STATE_ROOT/queue.lock"
+VIEWER_LOCK="$STATE_ROOT/viewer.lock"
+
+usage() {
+  cat <<'EOF'
+Usage:
+  agent-gallery submit [--tile] <title> <image> [image ...]
+  agent-gallery view
+  agent-gallery status
+
+`submit` queues an ordered image set. Pass `--tile` for a set that should open
+tiled rather than floating (use this for palette boards). `view` opens the
+current set in imv; use left/right to browse and q to close the viewer. The
+current set remains until a later submission advances the gallery. Only one
+viewer can run at a time. Every image is assigned a stable, non-destructive
+reference ID such as `amber-anchor`, visible in the Gallery overlay.
+EOF
+}
+
+ensure_state() {
+  mkdir -p "$QUEUE" "$REVIEWED"
+}
+
+reference_id() {
+  # 26 × 24 = 624 short, pronounceable IDs — enough for ordinary review sets.
+  # Assignment follows supplied order, so IDs are stable for the set and never
+  # alter source filenames, pixels, or metadata.
+  local index="$1"
+  local -a prefixes=(
+    amber aspen brisk cedar cobalt coral ember fern golden hazel indigo juniper
+    lilac maple midnight olive opal pepper quiet river saffron sunset tawny
+    velvet willow zephyr
+  )
+  local -a subjects=(
+    anchor bay bridge canyon comet cove dune falcon harbor heron island lantern
+    mesa otter pier quail reef sail tide valley wharf wren yacht zinnia
+  )
+  local prefix_count=${#prefixes[@]} subject_count=${#subjects[@]}
+  printf '%s-%s\n' "${prefixes[$((index / subject_count % prefix_count))]}" \
+    "${subjects[$((index % subject_count))]}"
+}
+
+ensure_labels() {
+  local item="$1" index=0
+  local labels temporary
+  labels="$item/labels"
+  temporary="${labels}.tmp"
+  local -a images=()
+
+  mapfile -t images <"$item/images"
+  if [[ -f $labels ]] && (( $(wc -l <"$labels") == ${#images[@]} )); then
+    return 0
+  fi
+
+  : >"$temporary"
+  for ((index = 0; index < ${#images[@]}; index++)); do
+    reference_id "$index" >>"$temporary"
+  done
+  mv -- "$temporary" "$labels"
+}
+
+label_for_path() {
+  local path="$1" index=0
+  local -a images=()
+  local -a labels=()
+  [[ -f $ACTIVE/images ]] || return 1
+  ensure_labels "$ACTIVE"
+  mapfile -t images <"$ACTIVE/images"
+  mapfile -t labels <"$ACTIVE/labels"
+  for ((index = 0; index < ${#images[@]}; index++)); do
+    if [[ ${images[index]} == "$path" ]]; then
+      printf '%s\n' "${labels[index]}"
+      return 0
+    fi
+  done
+  printf 'unlabeled-image\n'
+}
+
+submit() {
+  local layout="float"
+  if [[ ${1:-} == "--tile" ]]; then
+    layout="tile"
+    shift
+  fi
+
+  (( $# >= 2 )) || { usage >&2; exit 2; }
+  local title="$1"
+  shift
+  local image path mime batch item
+  local -a images=()
+
+  (( $# > 0 )) || { echo "agent-gallery: submit needs at least one image" >&2; exit 2; }
+
+  for image in "$@"; do
+    path=$(realpath -e -- "$image") || {
+      echo "agent-gallery: missing image: $image" >&2
+      exit 2
+    }
+    [[ -f $path ]] || { echo "agent-gallery: not a regular file: $path" >&2; exit 2; }
+    mime=$(file --brief --mime-type -- "$path")
+    [[ $mime == image/* ]] || { echo "agent-gallery: not an image: $path" >&2; exit 2; }
+    images+=("$path")
+  done
+
+  ensure_state
+  exec 9>"$QUEUE_LOCK"
+  flock 9
+
+  batch="$(date +%Y%m%dT%H%M%S-%N)-$$"
+  item="$QUEUE/$batch"
+  mkdir "$item"
+  printf '%s\n' "$title" >"$item/title"
+  printf '%s\n' "${images[@]}" >"$item/images"
+  printf '%s\n' "$layout" >"$item/layout"
+  ensure_labels "$item"
+
+  echo "Queued $((${#images[@]})) image(s): $title"
+}
+
+active_title() {
+  [[ -f $ACTIVE/title ]] && head -n 1 "$ACTIVE/title" || printf 'Untitled set'
+}
+
+active_layout() {
+  local title
+  if [[ -f $ACTIVE/layout ]]; then
+    head -n 1 "$ACTIVE/layout"
+    return
+  fi
+
+  # Preserve the intended behavior for palette boards queued before layout
+  # metadata existed.
+  title=$(active_title | tr '[:upper:]' '[:lower:]')
+  if [[ $title == *palette* || $title == *half-screen*tile* ]]; then
+    printf 'tile\n'
+  else
+    printf 'float\n'
+  fi
+}
+
+tile_viewer() {
+  local viewer_pid="$1" clients attempt
+
+  # The palette viewer has a dedicated app ID and normally opens tiled. Wait
+  # briefly for its exact client; if another rule made it float, correct only
+  # that client as a safeguard.
+  for ((attempt = 0; attempt < 40; attempt++)); do
+    clients=$(hyprctl clients -j 2>/dev/null || true)
+    if jq -e --argjson pid "$viewer_pid" '.[] | select(.pid == $pid)' \
+      >/dev/null <<<"$clients"; then
+      if jq -e --argjson pid "$viewer_pid" \
+        '.[] | select(.pid == $pid and .floating == true)' \
+        >/dev/null <<<"$clients"; then
+        hyprctl dispatch settiled "pid:$viewer_pid" >/dev/null 2>&1 || true
+      fi
+      return 0
+    fi
+    sleep 0.05
+  done
+
+  echo "agent-gallery: could not tile the palette viewer; it remains floating" >&2
+  return 1
+}
+
+view() {
+  local next status layout viewer_pid
+  local -a images=()
+
+  ensure_state
+  exec 8>"$VIEWER_LOCK"
+  if ! flock -n 8; then
+    echo "agent-gallery: a review is already open" >&2
+    exit 1
+  fi
+
+  exec 9>"$QUEUE_LOCK"
+  flock 9
+  next=$(find "$QUEUE" -mindepth 1 -maxdepth 1 -type d -printf '%f\n' | sort | head -n 1 || true)
+
+  # A set stays active after its viewer closes. The next agent submission is
+  # what advances it: on the following launch, archive the old set and promote
+  # the oldest newly submitted set.
+  if [[ -d $ACTIVE && -n $next ]]; then
+    mv "$ACTIVE" "$REVIEWED/$(date +%Y%m%dT%H%M%S)-superseded"
+  fi
+
+  if [[ ! -d $ACTIVE ]]; then
+    if [[ -z $next ]]; then
+      echo "agent-gallery: no image sets are waiting"
+      exit 0
+    fi
+    mv "$QUEUE/$next" "$ACTIVE"
+  fi
+  flock -u 9
+
+  mapfile -t images <"$ACTIVE/images"
+  (( ${#images[@]} > 0 )) || { echo "agent-gallery: active set has no images" >&2; exit 1; }
+  ensure_labels "$ACTIVE"
+  layout=$(active_layout)
+  printf 'Reviewing: %s (%d image(s))\n' "$(active_title)" "${#images[@]}"
+  printf 'Use left/right arrows to browse; press q when finished.\n'
+
+  set +e
+  if [[ $layout == "tile" ]]; then
+    # This unique Wayland app ID avoids Omarchy's generic `imv` float rule.
+    XDG_CONFIG_HOME="${XDG_CONFIG_HOME:-$HOME/.config}/agent-gallery" imv -i agent-gallery-palette "${images[@]}" &
+    viewer_pid=$!
+    tile_viewer "$viewer_pid" || true
+    wait "$viewer_pid"
+    status=$?
+  else
+    XDG_CONFIG_HOME="${XDG_CONFIG_HOME:-$HOME/.config}/agent-gallery" imv "${images[@]}"
+    status=$?
+  fi
+  set -e
+  if (( status == 0 )); then
+    echo "Viewer closed. This set remains available until another agent submits a new one."
+  fi
+
+  return "$status"
+}
+
+status() {
+  local count title
+  ensure_state
+  if [[ -d $ACTIVE ]]; then
+    printf 'Active: %s\n' "$(active_title)"
+  else
+    printf 'Active: none\n'
+  fi
+  count=$(find "$QUEUE" -mindepth 1 -maxdepth 1 -type d -printf '.' | wc -c)
+  printf 'Queued sets: %s\n' "$count"
+  if (( count > 0 )); then
+    printf 'Next: '
+    title=$(find "$QUEUE" -mindepth 1 -maxdepth 1 -type d -printf '%f\n' | sort | head -n 1)
+    head -n 1 "$QUEUE/$title/title"
+  fi
+}
+
+case "${1:-}" in
+  submit)
+    shift
+    submit "$@"
+    ;;
+  view)
+    (( $# == 1 )) || { usage >&2; exit 2; }
+    view
+    ;;
+  status)
+    (( $# == 1 )) || { usage >&2; exit 2; }
+    status
+    ;;
+  label)
+    (( $# == 2 )) || { echo "agent-gallery: label needs one image path" >&2; exit 2; }
+    label_for_path "$2"
+    ;;
+  -h|--help|help|'')
+    usage
+    ;;
+  *)
+    usage >&2
+    exit 2
+    ;;
+esac
