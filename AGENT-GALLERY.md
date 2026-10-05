@@ -10,10 +10,10 @@ local agent.
 agent-gallery submit "Short review title" /absolute/path/first.png /absolute/path/second.png
 ```
 
-For a palette or half-screen comparison, request a tiled viewer:
+For a side-by-side comparison, request a tiled viewer:
 
 ```bash
-agent-gallery submit --tile "Palette comparison" /absolute/path/first.png /absolute/path/second.png
+agent-gallery submit --tile "Before and after" /absolute/path/first.png /absolute/path/second.png
 ```
 
 - Supply only the images the user should compare, in the exact arrow-key order.

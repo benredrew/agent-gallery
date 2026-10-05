@@ -16,7 +16,7 @@ whenever you're ready.
   closes it. The set stays until an agent submits the next one, so you can
   reopen it.
 - **Side by side when it helps.** A set submitted with `--tile` opens tiled
-  rather than floating, for half-screen comparisons such as colour palettes.
+  rather than floating, for side-by-side comparisons such as before and after.
 
 ## Install
 
@@ -40,7 +40,7 @@ setup only needs a key that runs `agent-gallery view`.
 
 ```bash
 agent-gallery submit "Icon concepts" ~/art/a.png ~/art/b.png ~/art/c.png
-agent-gallery submit --tile "Palette comparison" light.png dark.png
+agent-gallery submit --tile "Before and after" before.png after.png
 agent-gallery view      # open the current set
 agent-gallery status    # what's open and what's waiting
 ```

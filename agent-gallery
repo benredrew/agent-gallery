@@ -17,7 +17,7 @@ Usage:
   agent-gallery status
 
 `submit` queues an ordered image set. Pass `--tile` for a set that should open
-tiled rather than floating (use this for palette boards). `view` opens the
+tiled rather than floating (for side-by-side comparisons). `view` opens the
 current set in imv; use left/right to browse and q to close the viewer. The
 current set remains until a later submission advances the gallery. Only one
 viewer can run at a time. Every image is assigned a stable, non-destructive
@@ -130,17 +130,8 @@ active_title() {
 }
 
 active_layout() {
-  local title
   if [[ -f $ACTIVE/layout ]]; then
     head -n 1 "$ACTIVE/layout"
-    return
-  fi
-
-  # Preserve the intended behavior for palette boards queued before layout
-  # metadata existed.
-  title=$(active_title | tr '[:upper:]' '[:lower:]')
-  if [[ $title == *palette* || $title == *half-screen*tile* ]]; then
-    printf 'tile\n'
   else
     printf 'float\n'
   fi
@@ -149,7 +140,7 @@ active_layout() {
 tile_viewer() {
   local viewer_pid="$1" clients attempt
 
-  # The palette viewer has a dedicated app ID and normally opens tiled. Wait
+  # The tiled viewer has a dedicated app ID and normally opens tiled. Wait
   # briefly for its exact client; if another rule made it float, correct only
   # that client as a safeguard.
   for ((attempt = 0; attempt < 40; attempt++)); do
@@ -166,7 +157,7 @@ tile_viewer() {
     sleep 0.05
   done
 
-  echo "agent-gallery: could not tile the palette viewer; it remains floating" >&2
+  echo "agent-gallery: could not tile the viewer; it remains floating" >&2
   return 1
 }
 
@@ -211,7 +202,7 @@ view() {
   set +e
   if [[ $layout == "tile" ]]; then
     # This unique Wayland app ID avoids Omarchy's generic `imv` float rule.
-    XDG_CONFIG_HOME="${XDG_CONFIG_HOME:-$HOME/.config}/agent-gallery" imv -i agent-gallery-palette "${images[@]}" &
+    XDG_CONFIG_HOME="${XDG_CONFIG_HOME:-$HOME/.config}/agent-gallery" imv -i agent-gallery-tiled "${images[@]}" &
     viewer_pid=$!
     tile_viewer "$viewer_pid" || true
     wait "$viewer_pid"
